@@ -325,8 +325,10 @@ class simpleBT:
             axis[1].set_title("alpha nav")
 
             result["fig"] = fig
-
-        return nav_out, pos_out, alpha_out, daily_rtn, result
+        if kwargs.get("daily_rtn", False):
+            return nav_out, pos_out, alpha_out, result, daily_rtn
+        else:
+            return nav_out, pos_out, alpha_out, result
 
     @staticmethod
     def curveanalysis(cls, nav):

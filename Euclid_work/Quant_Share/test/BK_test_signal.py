@@ -7,7 +7,7 @@
 from Euclid_work.Quant_Share.BackTest_signal import *
 from Euclid_work.Quant_Share.Utils import printJson
 
-DataClass = DataPrepare_signal("20180101", "20221231")
+DataClass = DataPrepare_signal("20200101", "20221231")
 DataClass.get_Tushare_data()
 
 # group beck test
@@ -18,7 +18,7 @@ Score = 1 - DataClass.Score
 Score[Score < Score.quantile(0.9)] = np.nan
 
 fig, result, nav, pos_out, alpha_nav, daily_rtn = BTClass.main_back_test(
-    Score, plot_begin=20200101, fee_rate=0.001, daily_rtn=True
+    Score, plot_begin=20200101, fee_rate=0, daily_rtn=True
 )
 fig.show()
-printJson(result)
+print(result)
