@@ -113,6 +113,11 @@ class simpleBT:
         print(">>> Back Test staring ...")
         print("\t>>> the shape of score is {}".format(Score.shape))
         print("\t>>> rolling back test starting ...")
+        # prepare rtn_holding(overnight rtn): (open_t - close_t-1) / open_t
+        overnight_rtn = (
+            self.tickerData["openPrice"] - self.tickerData["closePrice"]
+        ) / self.tickerData["openPrice"]
+        overnight_rtn.fillna(0, inplace=True)
         # prepare rtn_before_trade and rtn_after_trade
         self.tickerData["Rtn"] = self.tickerData["chgPct"].copy()
         self.tickerData["Rtn"].fillna(0, inplace=True)
@@ -139,7 +144,7 @@ class simpleBT:
         start_dt = Score.index[0]
         self.tickerData["Rtn"] = self.tickerData["Rtn"].loc[start_dt:]
 
-        # init position, index is code, columns is tradeDate
+        # init position、daily_rtn index is code, columns is tradeDate
         temp_pos = pd.Series(
             data=np.zeros(len(self.tickerData["Rtn"].columns)),
             index=self.tickerData["Rtn"].columns,
@@ -149,33 +154,38 @@ class simpleBT:
             index=self.tickerData["Rtn"].index,
             columns=self.tickerData["Rtn"].columns,
         )
-        # init empty fee、daily_rtn、turnover to store info, index is tradeDate
+        daily_rtn = pos_out.copy()
+
+        # init empty fee、turnover to store info, index is tradeDate
         fee = pd.Series(
             np.zeros(len(self.tickerData["Rtn"].index)),
             index=self.tickerData["Rtn"].index,
         )
-        daily_rtn = fee.copy()
         turnover = fee.copy()
+
+        # init daily rtn with zeros
+        daily_rtn_zeros = pd.Series(
+            np.zeros(len(self.tickerData["Rtn"].columns)),
+            index=self.tickerData["Rtn"].columns,
+        )
 
         for date in tqdm(self.tickerData["Rtn"].index.to_list()):
             # the rtn date should >= start date
             if date < start_dt:
                 continue
 
-            # calc the position holding rtn
-            pos_rtn = (temp_pos * self.tickerData["Rtn"].loc[date]).sum()
-            # init the rtn after trade as 0
-            trade_rtn = 0
-
             if date in Score.index.to_list():
-                # pos adjusted by rtn
-                temp_pos = temp_pos * (1 + rtn_before_trade.loc[date])
-                temp_pos = temp_pos / temp_pos.sum()
-                temp_pos.fillna(0, inplace=True)
+                # calc the rtn before trade rtn, then adjust pos
+                pretrade_rtn = temp_pos * overnight_rtn.loc[date]
+                temp_pos = self.__adjust_pos_with_rtn(temp_pos, pretrade_rtn)
 
-                # calc target position
+                # calc the position holding rtn, then adjust pos
+                pos_rtn = temp_pos * rtn_before_trade.loc[date]
+                temp_pos = self.__adjust_pos_with_rtn(temp_pos, pos_rtn)
+
+                # calc target position with score
                 tmpScore = Score.loc[date].copy()
-                ## adjust by bench con
+                ## 1 adjust by bench con
                 _, idx = binary_search(
                     self.benchData["con_code"].index, format_date(date)
                 )
@@ -185,7 +195,7 @@ class simpleBT:
                 _scale = kwargs.get("scale", 2)
                 _inf2nan = kwargs.get("inf2nan", True)
                 _inclusive = kwargs.get("inclusive", True)
-                # 中位数去极值
+                # 2 中位数去极值
                 if _med:
                     tmpScore = winsorize_med(
                         data=tmpScore,
@@ -193,7 +203,7 @@ class simpleBT:
                         inclusive=_inclusive,
                         inf2nan=_inf2nan,
                     )
-                # Zcore处理
+                # 3 Zcore处理
                 if _Zcore:
                     tmpScore = standardlize(data=tmpScore, inf2nan=_inf2nan)
                 try:
@@ -243,28 +253,40 @@ class simpleBT:
                             )
                     break
                 diff[~tradable] = 0
-                fee.loc[date] = np.abs(diff).sum() * fee_rate  # 计算费用=(买入+卖出)*手续费率
-                trade_rtn = (diff * rtn_after_trade.loc[date]).sum()  # 使用交易后的收益率更新收益
-                temp_pos += diff  # 更新仓位
+
+                # 计算费用=abs(买入+卖出)*手续费率
+                fee_daily = np.abs(diff) * fee_rate
+                fee.loc[date] = fee_daily.sum()
+                temp_pos = temp_pos + diff*(1-fee_rate)
+                temp_pos = self.__adjust_pos_with_rtn(temp_pos, daily_rtn_zeros)
+                # 使用交易后的收益率更新收益, 并更新仓位
+                trade_rtn = temp_pos * rtn_after_trade.loc[date]
+                temp_pos = self.__adjust_pos_with_rtn(temp_pos, trade_rtn)
+
                 turnover.loc[date] = np.abs(diff).sum()  # 存储当日的交易额
 
             else:  # not in Score
-                temp_pos = temp_pos * (
-                    1 + self.tickerData["Rtn"].loc[date]
-                )  # 直接使用close/close_pre - 1收益率进行更新
-                temp_pos = temp_pos / temp_pos.sum()
-                temp_pos.fillna(0, inplace=True)
-
-            pos_out.loc[date] = temp_pos  # 记录个股仓位
+                # set pos_rtn as c2c rtn
+                pos_rtn = self.tickerData["Rtn"].loc[date]
+                # 直接使用c2c rtn进行更新
+                temp_pos = self.__adjust_pos_with_rtn(temp_pos, pos_rtn)
+                # set pretrade, fee_daily, trade rtn to zero
+                pretrade_rtn = daily_rtn_zeros
+                fee_daily = daily_rtn_zeros
+                trade_rtn = daily_rtn_zeros
+            # 记录个股仓位
+            pos_out.loc[date] = temp_pos
+            # 每日收益= 持仓收益(隔夜+交易前) - 手续费 + 交易后的收益
             daily_rtn.loc[date] = (
-                pos_rtn + trade_rtn - fee.loc[date]
-            )  # 每日收益=持仓收益+交易后的收益-手续费
+                (1+pos_rtn) * (1+pretrade_rtn) * (1-fee_daily) * (1+trade_rtn) - 1
+                # (1 + pos_rtn) * (1 + pretrade_rtn) * (1 + trade_rtn) - 1
+            )
 
         print(">>> Back Test done")
         print("-*" * 30)
         print(">>> calc and display risk metrics")
         # calc nav
-        nav = (1 + daily_rtn).cumprod()  # 净值
+        nav = (1 + daily_rtn.sum(axis=1)).cumprod()  # 净值
         nav_out = nav.copy()  # 组合净值
 
         # 指数相关
@@ -304,7 +326,7 @@ class simpleBT:
 
             result["fig"] = fig
 
-        return nav_out, pos_out, alpha_out, result
+        return nav_out, pos_out, alpha_out, daily_rtn, result
 
     @staticmethod
     def curveanalysis(cls, nav):
@@ -370,7 +392,7 @@ class simpleBT:
         plot_begin = get_tradeDate(kwargs.get("plot_begin", Score.index[0]), 0)
         group_res = {}
         for group in range(5):
-            (nav, pos_out, alpha_nav, result) = self.backTest(
+            (nav, pos_out, alpha_nav, daily_rtn, result) = self.backTest(
                 Score.loc[metric_begin:], group=group + 1, dealPrice="vwap", **kwargs
             )
             group_res["{}".format(group + 1)] = (nav, pos_out, alpha_nav, result)
@@ -395,3 +417,15 @@ class simpleBT:
             outMetrics = pd.concat([outMetrics, tmpMetrics], axis=0, ignore_index=True)
 
         return fig, outMetrics, group_res
+    @staticmethod
+    def __adjust_pos_with_rtn(tmp_pos, tmp_rtn):
+        assert len(tmp_pos) == len(tmp_rtn)
+        if tmp_pos.sum() == 0:
+            return tmp_pos
+        else:
+            tmp_pos = tmp_pos.fillna(0)
+            tmp_pos = tmp_pos*(1+tmp_rtn)
+            assert tmp_pos.sum() != 0
+            return tmp_pos/tmp_pos.sum()
+
+

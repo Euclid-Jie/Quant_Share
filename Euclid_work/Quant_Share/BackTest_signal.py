@@ -50,7 +50,7 @@ class simpleBT_signal(simpleBT):
         metric_begin = get_tradeDate(kwargs.get("metric_begin", Score.index[0]), 0)
         plot_begin = get_tradeDate(kwargs.get("plot_begin", Score.index[0]), 0)
         # 传入的group参数为None
-        (nav, pos_out, alpha_nav, result) = self.backTest(
+        (nav, pos_out, alpha_nav, daily_rtn, result) = self.backTest(
             Score.loc[metric_begin:], dealPrice="vwap", **kwargs
         )
 
@@ -62,4 +62,4 @@ class simpleBT_signal(simpleBT):
         self.get_nav_data_2_plot(bench_nav.loc[plot_begin:]).plot()  # bench
         axis.legend(["nav", "bench_nav"])
 
-        return fig, result, nav, pos_out, alpha_nav
+        return fig, result, nav, pos_out, alpha_nav, daily_rtn
